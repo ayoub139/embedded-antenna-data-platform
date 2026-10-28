@@ -1,0 +1,19 @@
+# Build directories
+build/
+build-*/
+cmake-build*/
+CMakeFiles/
+
+# CMake generated files
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+
+# Compiled artifacts
+*.o
+*.a
+*.so
+*.out
+
+# Editor and OS files
+.vscode/
