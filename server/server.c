@@ -5,44 +5,37 @@
 #include <arpa/inet.h>
 #include <stdbool.h>
 #include <unistd.h>
+#include <sys/epoll.h>
+#include <fcntl.h>
+#include <errno.h>
 #include "antenna_simulator.h"
 
-int handle_connection(int client_socket)
+#define MAX_EVENTS 10
+
+struct client_state {
+	int socket;
+	char buffer[sizeof(struct antenna_packet)];
+	int recv_bytes;
+};
+
+
+enum event_type{
+	EVENT_SERVER,
+	EVENT_CLIENT
+};
+
+struct event_data {
+	enum event_type type;
+	struct client_state *client;
+};
+
+void cleanup_client(int epoll_fd, struct event_data* event_data)
 {
-	printf("Client is connected\n");
-	struct antenna_packet packet;
-	ssize_t recv_bytes = -1;
-	ssize_t total_recv = 0;
-	while(recv_bytes != 0)
-	{
-		while(total_recv < sizeof(packet))
-		{
-			char *ptr = (char *)&packet + total_recv;
-			CHECK(recv_bytes = recv(client_socket, ptr, sizeof(packet) - total_recv, 0),
-											"failed to receive bytes");
-			if (recv_bytes == 0)
-			{
-				printf("Client disconnected\n");
-				close(client_socket);
-				return -1;
-			}
-			total_recv+=recv_bytes;
-		}
-
-		printf("Packet ID: %d\n", packet.id);
-		printf("Sequence number: %d\n", packet.sequence_number);
-		printf("Data:\n");
-		for(int i = 0; i < MAX_SAMPLES_PER_PACKET; i++)
-		{
-			printf("%d ",packet.samples[i]);
-		}
-		printf("\n");
-		total_recv = 0;
-	}
-	
-	close(client_socket);
-
-	return 1;
+	struct client_state* client = event_data->client;
+	epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client->socket, NULL);
+	close(client->socket);
+	free(client);
+	free(event_data);
 }
 
 int main()
@@ -56,21 +49,158 @@ int main()
 	// create socket 
 	CHECK(server_socket = socket(AF_INET, SOCK_STREAM, 0), "failed to create socket");
 
+	// making my server socket non blocking 
+	int flags = fcntl(server_socket, F_GETFL, 0);
+	CHECK(flags, "fcntl F_GETFL failed");
+	CHECK(fcntl(server_socket, F_SETFL, flags | O_NONBLOCK), "fcntl F_SETFL failed");
+
 	// bind
 	CHECK(bind(server_socket, (struct sockaddr*)&server_addr, sizeof(server_addr)), "bind failed");
 
 	// listen on port 9002
-	CHECK(listen(server_socket, 5), "listen failed");
+	CHECK(listen(server_socket, 100), "listen failed");
+
+	// Create an epoll instance
+	int epoll_fd = epoll_create1(0);
+	CHECK(epoll_fd, "epoll_create failed");
+
+	struct event_data server_event_data = {
+		.type = EVENT_SERVER,
+		.client = NULL
+	};
+
+	struct epoll_event event;
+	event.events = EPOLLIN;
+	event.data.ptr = &server_event_data;
+	CHECK(epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_socket, &event), "failed");
+	
+	struct epoll_event events[MAX_EVENTS];
+
 
 	while (true)
 	{
 		printf("Waiting for connections sockets\n");
-		
-		//Accept client sockets 
-		int client_socket;
-		CHECK(client_socket = accept(server_socket, NULL, NULL), "failed to accept sockets");
-		printf("Connected\n");
-		handle_connection(client_socket);
+
+		int ready = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
+		CHECK(ready, "epoll_wait failed");
+		for(int i = 0; i < ready; i++)
+		{
+			struct event_data *event_data = events[i].data.ptr;
+			if (event_data->type == EVENT_SERVER)
+			{
+				// Keep accepting connections until the non-blocking socket returns EAGAIN/EWOULDBLOCK,
+				// meaning there are no more pending connections to accept. Then return to epoll_wait().
+				while(true)
+				{
+					//Accept client sockets 
+					int client_socket;
+					client_socket = accept(server_socket, NULL, NULL);
+
+					if (client_socket == -1)
+					{
+						if ((errno == EAGAIN) || (errno == EWOULDBLOCK))
+						{
+							break;
+						}
+
+						perror("accept failed\n");
+						break;
+					}
+
+					printf("Connected\n");
+			    
+					// make my client non blocking
+					// recv() may return after reading only part of a packet.
+					// epoll_wait() lets the server handle other clients while waiting for the remaining bytes.
+					int client_socket_flags = fcntl(client_socket, F_GETFL, 0);
+					CHECK(client_socket_flags, "F_GETFL client flags failed");
+					CHECK(fcntl(client_socket, F_SETFL, client_socket_flags | O_NONBLOCK), "F_SETFL client flags failed");
+
+					struct client_state *client_state = malloc(sizeof(struct client_state));
+					if (client_state == NULL)
+					{
+						perror("malloc client_state failed\n");
+						close(client_socket);
+						continue;
+					}
+					client_state->socket = client_socket;
+					client_state->recv_bytes = 0;
+
+					struct event_data *client_event_data = malloc(sizeof(struct event_data));
+					if (client_event_data == NULL)
+					{
+						perror("malloc client_event_data failed\n");
+						free(client_state);
+						close(client_socket);
+						continue;
+					}
+					client_event_data->type = EVENT_CLIENT;
+					client_event_data->client = client_state;
+					
+					struct epoll_event event_client;
+					event_client.events = EPOLLIN;
+					event_client.data.ptr = client_event_data;
+					if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_socket, &event_client) == -1)
+					{
+						perror("epoll_ctl failed");
+						close(client_socket);
+						free(client_event_data);
+						free(client_state);
+						continue;
+					}
+				}			
+			}
+			else
+			{
+				struct client_state* client = event_data->client;
+				ssize_t n = recv(
+					client->socket,
+					client->buffer + client->recv_bytes,
+					sizeof(struct antenna_packet) - client->recv_bytes,
+					0
+				);				
+				if (n > 0)
+				{
+					client->recv_bytes += n;
+				}
+				else if (n == 0)
+				{
+					printf("Client disconnected\n");
+					cleanup_client(epoll_fd, event_data);
+					continue;
+				}
+				else if (errno == EAGAIN || errno == EWOULDBLOCK)
+				{
+					continue;
+				}
+				else
+				{
+					perror("recv failed");
+					cleanup_client(epoll_fd, event_data);
+					continue;
+				}
+
+				if (client->recv_bytes == sizeof(struct antenna_packet))
+				{
+					struct antenna_packet *packet =
+						(struct antenna_packet *)client->buffer;
+
+					printf("Packet ID: %d\n", packet->id);
+					printf("Sequence number: %d\n", packet->sequence_number);
+					printf("Data:\n");
+
+					for (int j = 0; j < MAX_SAMPLES_PER_PACKET; j++)
+					{
+						printf("%d ", packet->samples[j]);
+					}
+
+					printf("\n");
+
+					client->recv_bytes = 0;
+				}
+			}
+		}
+				
 	}
 
 	return 0;
