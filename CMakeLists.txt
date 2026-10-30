@@ -12,12 +12,15 @@ add_executable(client
 
 add_executable(server 
     server/server.c
+    server/queue.c
 )
 
 target_include_directories(server PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/client
+    ${CMAKE_CURRENT_SOURCE_DIR}/server
 )
 
 target_compile_options(client PRIVATE -Wall -Wextra)
 target_compile_options(server PRIVATE -Wall -Wextra)
+ 
 

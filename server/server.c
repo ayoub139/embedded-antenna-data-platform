@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include "antenna_simulator.h"
+#include <queue.h>
 
 #define MAX_EVENTS 10
 
@@ -17,7 +18,6 @@ struct client_state {
 	char buffer[sizeof(struct antenna_packet)];
 	int recv_bytes;
 };
-
 
 enum event_type{
 	EVENT_SERVER,
@@ -28,6 +28,28 @@ struct event_data {
 	enum event_type type;
 	struct client_state *client;
 };
+
+void* worker_function(void* arg)
+{
+	struct packet_queue *queue = arg;
+	struct antenna_packet packet;
+	while(true)
+	{
+		queue_pop(queue, &packet);
+
+        printf("Worker processing packet ID: %d\n", packet.id);
+        printf("Sequence number: %d\n", packet.sequence_number);
+
+        printf("Data:\n");
+        for (int i = 0; i < MAX_SAMPLES_PER_PACKET; i++)
+        {
+            printf("%d ", packet.samples[i]);
+        }
+        printf("\n");
+    }
+
+    return NULL;
+} 
 
 void cleanup_client(int epoll_fd, struct event_data* event_data)
 {
@@ -76,11 +98,32 @@ int main()
 	
 	struct epoll_event events[MAX_EVENTS];
 
+	struct packet_queue queue = {0};
+
+	if (pthread_mutex_init(&queue.mutex, NULL) != 0)
+	{
+		fprintf(stderr, "Failed to initialize queue mutex\n");
+		return 1;
+	}
+
+	if (pthread_cond_init(&queue.not_empty, 0))
+	{
+		fprintf(stderr, "failed to initialize queue condition variable");
+		pthread_mutex_destroy(&queue.mutex);
+		return -1;
+	}
+
+	pthread_t worker;
+	if(pthread_create(&worker, NULL, worker_function, &queue) != 0)
+	{
+		fprintf(stderr, "failed to create thread\n");
+		return -1;
+	}
+
 
 	while (true)
 	{
 		printf("Waiting for connections sockets\n");
-
 		int ready = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
 		CHECK(ready, "epoll_wait failed");
 		for(int i = 0; i < ready; i++)
@@ -185,16 +228,10 @@ int main()
 					struct antenna_packet *packet =
 						(struct antenna_packet *)client->buffer;
 
-					printf("Packet ID: %d\n", packet->id);
-					printf("Sequence number: %d\n", packet->sequence_number);
-					printf("Data:\n");
-
-					for (int j = 0; j < MAX_SAMPLES_PER_PACKET; j++)
+					if(queue_push(&queue, packet) == -1)
 					{
-						printf("%d ", packet->samples[j]);
+						fprintf(stderr, "queue is full : packet dropped\n");
 					}
-
-					printf("\n");
 
 					client->recv_bytes = 0;
 				}

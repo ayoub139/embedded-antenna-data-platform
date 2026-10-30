@@ -4,7 +4,7 @@
 NUM_CLIENTS=5
 
 # Chemin vers le binaire client
-CLIENT="./client"
+CLIENT="./bin/client"
 
 echo "Launching $NUM_CLIENTS clients..."
 

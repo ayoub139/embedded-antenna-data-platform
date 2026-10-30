@@ -11,3 +11,9 @@ echo "=== Building ARM server ==="
 cmake -S . -B build-server \
 -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN"
 cmake --build build-server --target server
+
+mkdir -p ./bin 
+cp build-client/client ./bin 
+cp build-server/server ./bin
+
+

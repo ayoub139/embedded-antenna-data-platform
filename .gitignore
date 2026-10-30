@@ -4,6 +4,9 @@ build-*/
 cmake-build*/
 CMakeFiles/
 
+#bin directory
+bin/
+
 # CMake generated files
 CMakeCache.txt
 cmake_install.cmake
