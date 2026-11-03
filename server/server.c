@@ -11,6 +11,7 @@
 #include "antenna_simulator.h"
 #include <queue.h>
 
+#define THREAD_POOL_SIZE 4
 #define MAX_EVENTS 10
 
 struct client_state {
@@ -80,7 +81,7 @@ int main()
 	CHECK(bind(server_socket, (struct sockaddr*)&server_addr, sizeof(server_addr)), "bind failed");
 
 	// listen on port 9002
-	CHECK(listen(server_socket, 100), "listen failed");
+	CHECK(listen(server_socket, 1500), "listen failed");
 
 	// Create an epoll instance
 	int epoll_fd = epoll_create1(0);
@@ -113,17 +114,21 @@ int main()
 		return -1;
 	}
 
-	pthread_t worker;
-	if(pthread_create(&worker, NULL, worker_function, &queue) != 0)
+	pthread_t pool[THREAD_POOL_SIZE];
+	for(int i = 0; i < THREAD_POOL_SIZE; i++)
 	{
-		fprintf(stderr, "failed to create thread\n");
-		return -1;
+		if(pthread_create(&pool[i], NULL, worker_function, &queue) != 0)
+		{
+			fprintf(stderr, "failed to create thread\n");
+			return -1;
+		}
 	}
+	
 
+	printf("Waiting for connections sockets\n");
 
 	while (true)
 	{
-		printf("Waiting for connections sockets\n");
 		int ready = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
 		CHECK(ready, "epoll_wait failed");
 		for(int i = 0; i < ready; i++)
