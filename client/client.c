@@ -42,7 +42,6 @@ int main()
 							 + sizeof(uint16_t);
 
 	    uint16_t sample_count = packets[i].header.payload_length;
-		
 	    /* convert multibyte fields to network byte order before sending */
 	    packets[i].header.magic_number    = htonl(packets[i].header.magic_number);
 	    packets[i].header.sequence_number = htons(packets[i].header.sequence_number);
@@ -74,7 +73,7 @@ int main()
 			total_sent+=byte_sent;
 		}
 
-        //nanosleep(&delay, NULL); // sleep 100ms
+        nanosleep(&delay, NULL); // sleep 100ms
     }
 
 	close(client_socket);
