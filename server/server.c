@@ -4,6 +4,7 @@
 #include <stdlib.h> 
 #include <arpa/inet.h>
 #include <stdbool.h>
+#include <string.h>
 #include <unistd.h>
 #include <sys/epoll.h>
 #include <fcntl.h>
@@ -17,7 +18,8 @@
 struct client_state {
 	int socket;
 	char buffer[sizeof(struct antenna_packet)];
-	int recv_bytes;
+	size_t recv_bytes;
+	size_t expected_size;
 };
 
 enum event_type{
@@ -38,13 +40,13 @@ void* worker_function(void* arg)
 	{
 		queue_pop(queue, &packet);
 
-        printf("Worker processing packet ID: %d\n", packet.id);
-        printf("Sequence number: %d\n", packet.sequence_number);
+        printf("Worker processing packet ID: %u\n", packet.header.id);
+        printf("Sequence number: %u\n", packet.header.sequence_number);
 
         printf("Data:\n");
-        for (int i = 0; i < MAX_SAMPLES_PER_PACKET; i++)
+        for (uint16_t i = 0; i < packet.header.payload_length; i++)
         {
-            printf("%d ", packet.samples[i]);
+            printf("%u ", packet.samples[i]);
         }
         printf("\n");
     }
@@ -124,7 +126,6 @@ int main()
 		}
 	}
 	
-
 	printf("Waiting for connections sockets\n");
 
 	while (true)
@@ -173,7 +174,7 @@ int main()
 					}
 					client_state->socket = client_socket;
 					client_state->recv_bytes = 0;
-
+					client_state->expected_size = sizeof(struct antenna_packet_header);
 					struct event_data *client_event_data = malloc(sizeof(struct event_data));
 					if (client_event_data == NULL)
 					{
@@ -204,7 +205,7 @@ int main()
 				ssize_t n = recv(
 					client->socket,
 					client->buffer + client->recv_bytes,
-					sizeof(struct antenna_packet) - client->recv_bytes,
+					client->expected_size - client->recv_bytes,
 					0
 				);				
 				if (n > 0)
@@ -228,17 +229,80 @@ int main()
 					continue;
 				}
 
-				if (client->recv_bytes == sizeof(struct antenna_packet))
+				if (client->recv_bytes == sizeof(struct antenna_packet_header))
 				{
-					struct antenna_packet *packet =
-						(struct antenna_packet *)client->buffer;
+					struct antenna_packet_header header;
+					memcpy(&header, client->buffer, sizeof(header));
+					uint16_t payload_length = ntohs(header.payload_length);
+					if (payload_length > MAX_SAMPLES_PER_PACKET)
+					{
+						fprintf(stderr, "invalid packet payload length; packet dropped\n");
+						client->recv_bytes = 0;
+						continue;
+					}
+					client->expected_size = sizeof(struct antenna_packet_header) +
+						antenna_packet_payload_bytes(payload_length) +
+						sizeof(uint16_t);
+				}
 
-					if(queue_push(&queue, packet) == -1)
+				if (client->recv_bytes == client->expected_size)
+				{
+					struct antenna_packet packet;
+					memset(&packet, 0, sizeof(packet));
+					memcpy(&packet.header, client->buffer, sizeof(struct antenna_packet_header));
+					memcpy(&packet.samples, client->buffer + sizeof(struct antenna_packet_header),
+						antenna_packet_payload_bytes(ntohs(packet.header.payload_length)));
+					memcpy(&packet.crc, client->buffer + sizeof(struct antenna_packet_header) +
+						antenna_packet_payload_bytes(ntohs(packet.header.payload_length)), sizeof(uint16_t));
+
+					uint16_t sample_count = ntohs(packet.header.payload_length);
+					if (sample_count > MAX_SAMPLES_PER_PACKET)
+					{
+						fprintf(stderr, "invalid packet payload length; packet dropped\n");
+						client->recv_bytes = 0;
+						client->expected_size = sizeof(struct antenna_packet_header);
+						continue;
+					}
+
+					// Magic number and version verification
+					uint32_t magic_number = ntohl(packet.header.magic_number);
+					if (magic_number != ANTENNA_PROTOCOL_MAGIC ||
+						packet.header.version != ANTENNA_PROTOCOL_VERSION)
+					{
+						fprintf(stderr, "invalid packet header; packet dropped\n");
+						client->recv_bytes = 0;
+						client->expected_size = sizeof(struct antenna_packet_header);
+						continue;
+					}
+
+					// CRC verification
+					size_t crc_data_size = sizeof(packet.header) + antenna_packet_payload_bytes(sample_count);
+					uint16_t received_crc = ntohs(packet.crc);
+					uint16_t calculated_crc = crc16_ccitt_false((const uint8_t *)client->buffer, crc_data_size);					
+					if (received_crc != calculated_crc)
+					{
+						fprintf(stderr, "packet CRC mismatch; packet dropped\n");
+						client->recv_bytes = 0;
+						client->expected_size = sizeof(struct antenna_packet_header);
+						continue;
+					}
+
+					packet.header.magic_number = magic_number;
+					packet.header.sequence_number = ntohs(packet.header.sequence_number);
+					packet.header.payload_length = sample_count;
+					packet.crc = received_crc;
+					for (uint16_t j = 0; j < sample_count; j++)
+					{
+						packet.samples[j] = ntohs(packet.samples[j]);
+					}
+
+					if (queue_push(&queue, &packet) == -1)
 					{
 						fprintf(stderr, "queue is full : packet dropped\n");
 					}
 
 					client->recv_bytes = 0;
+					client->expected_size = sizeof(struct antenna_packet_header);
 				}
 			}
 		}

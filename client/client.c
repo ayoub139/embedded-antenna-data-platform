@@ -10,13 +10,15 @@
 
 int main()
 {
+	srand(time(NULL));
 	int client_socket;
 	int connection_status;
 	struct sockaddr_in server_addr;
 	server_addr.sin_family = AF_INET;
 	server_addr.sin_port = htons(9002);
 	inet_pton(AF_INET, "192.168.0.100", &server_addr.sin_addr);
-	
+	//server_addr.sin_addr.s_addr = INADDR_ANY;
+
 	// create socket
 	CHECK(client_socket = socket(AF_INET, SOCK_STREAM, 0), "failed to create socket");
 	
@@ -26,7 +28,7 @@ int main()
 	
 	
 	int packet_nbr = 10;
-    int seq_nbr = 0;
+    uint16_t seq_nbr = 0;
 	int total_size = 0;
     struct antenna_packet packets[10];
 
@@ -34,8 +36,26 @@ int main()
     {
 	    int total_sent = 0;
 		int byte_sent = 0;
-		total_size = sizeof(packets[i]);
-        generate_packet(&packets[i], i, &seq_nbr); 
+		
+        CHECK(generate_packet(&packets[i], (uint8_t)i, &seq_nbr),"failed to generate packet");
+		total_size = sizeof(packets[i].header) + antenna_packet_payload_bytes(packets[i].header.payload_length)
+							 + sizeof(uint16_t);
+
+	    uint16_t sample_count = packets[i].header.payload_length;
+		
+	    /* convert multibyte fields to network byte order before sending */
+	    packets[i].header.magic_number    = htonl(packets[i].header.magic_number);
+	    packets[i].header.sequence_number = htons(packets[i].header.sequence_number);
+	    packets[i].header.payload_length  = htons(packets[i].header.payload_length);
+	    for(int j = 0; j < sample_count; j++)
+	    {
+	    	packets[i].samples[j] = htons(packets[i].samples[j]);
+	    }
+		
+		size_t crc_data_size = sizeof(packets[i].header) + antenna_packet_payload_bytes(sample_count);
+		uint16_t crc = htons(crc16_ccitt_false((const uint8_t *)&packets[i], crc_data_size));
+		memcpy((char*)&packets[i] + sizeof(struct antenna_packet_header) + antenna_packet_payload_bytes(sample_count),
+				&crc, sizeof(uint16_t));
 		
 		while(total_sent < total_size)
 		{
@@ -54,7 +74,7 @@ int main()
 			total_sent+=byte_sent;
 		}
 
-        nanosleep(&delay, NULL); // sleep 100ms
+        //nanosleep(&delay, NULL); // sleep 100ms
     }
 
 	close(client_socket);

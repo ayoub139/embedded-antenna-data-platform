@@ -15,7 +15,6 @@ struct packet_queue{
 	int head;
 	int tail;
 	int count; 
-
 	pthread_mutex_t mutex;
 	pthread_cond_t  not_empty;
 };
